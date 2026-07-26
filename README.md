@@ -212,10 +212,41 @@ Deliberately, so the talk can build it up on stage:
 That sets the version, commits, tags and pushes. The tag format is configured as
 `v@{project.version}`, so releases are tagged `v1.0.0` rather than the plugin's default
 `supplychain-demo-1.0.0`. There is no `distributionManagement`, so `release:perform` is
-configured to run `verify` instead of `deploy`.
+configured to run `verify` instead of `deploy` — the published artifact is the container
+image, not a JAR in a Maven repository.
 
 Use the release version as the `projectVersion` when publishing the SBOM — that is the
 number the findings in Dependency-Track end up attached to.
+
+## Container image
+
+Every build of `main` and every `v*` tag publishes to
+[GHCR](https://github.com/d135-1r43/supplychain-demo/pkgs/container/supplychain-demo),
+tagged with the Maven version of that build:
+
+| Trigger | Version in `pom.xml` | Image tags |
+| --- | --- | --- |
+| push to `main` | `1.0.1-SNAPSHOT` | `1.0.1-SNAPSHOT`, `latest` |
+| tag `v1.0.0` from `mvn release:prepare` | `1.0.0` | `1.0.0` |
+| pull request | — | built but not pushed |
+
+Note that `latest` follows the snapshot from `main`, not the newest release. Pulling it
+gives you the current state of the demo; releases are only reachable under their exact
+version, which is what you want when a finding has to be traced back to a specific build.
+
+```shell
+docker run --rm -p 8080:8080 \
+  -e QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://host.docker.internal:5432/demo \
+  -e QUARKUS_DATASOURCE_USERNAME=demo -e QUARKUS_DATASOURCE_PASSWORD=demo \
+  ghcr.io/d135-1r43/supplychain-demo:latest
+```
+
+The image is built from `src/main/docker/Dockerfile.jvm`, which the Quarkus scaffold
+provides: a UBI 9 JDK 25 runtime running as non-root user 185. It expects `target/quarkus-app/`
+to exist, so the workflow packages before it builds.
+
+The first push creates the package as **private**. Make it public under the package's
+settings if the audience should be able to pull it.
 
 ## References
 
