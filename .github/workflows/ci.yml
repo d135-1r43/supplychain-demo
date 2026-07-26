@@ -170,6 +170,11 @@ jobs:
 
           if ! report; then
             echo "::warning::SBOM published, but reading the findings back failed. The API key needs VIEW_PORTFOLIO and VIEW_VULNERABILITY for that."
+            # Report what the key actually carries. A permission added to the wrong team looks
+            # identical to one that was never added at all.
+            if SOFT=1 call "$url/api/v1/team/self" -H "X-Api-Key: $key"; then
+              printf '%s' "$body" | jq -r '"Key belongs to team: \(.name)\nIts permissions: \([.permissions[].name] | join(", "))"'
+            fi
           fi
 
       # Pull requests build the image to prove the Dockerfile still works, but stop short of
