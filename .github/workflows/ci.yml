@@ -72,7 +72,7 @@ jobs:
       # `latest` tracks the snapshot from main, not the newest release.
       - name: Compute image tags
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE }}
           tags: |
