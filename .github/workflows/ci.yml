@@ -90,8 +90,11 @@ jobs:
 
           # Splits the status code off the body so a failure can say what actually happened
           # instead of failing later on unparseable JSON.
+          # SOFT=1 downgrades the annotation to a warning, for calls whose failure the caller
+          # intends to recover from — an error annotation on a green run is just confusing.
           call() {
-            local out status
+            local out status level=error
+            [ -n "${SOFT:-}" ] && level=warning
             out=$(curl -sS -w '\n%{http_code}' "$@")
             status=$(printf '%s' "$out" | tail -n1)
             body=$(printf '%s' "$out" | sed '$d')
@@ -99,10 +102,10 @@ jobs:
               case "$status" in
                 # Dependency-Track answers 401 both for an unknown key and for a known key
                 # whose team lacks a permission, so the body is the part that matters.
-                401) echo "::error::Dependency-Track returned 401 — either the key is wrong or its team is missing a permission (BOM_UPLOAD, PROJECT_CREATION_UPLOAD). See the response below." ;;
-                403) echo "::error::The API key lacks a permission (403)." ;;
-                404) echo "::error::No Dependency-Track API found (404). DTRACK_URL should be the base URL, without /api." ;;
-                *)   echo "::error::Dependency-Track returned HTTP $status." ;;
+                401) echo "::${level}::Dependency-Track returned 401 — either the key is wrong or its team is missing a permission (BOM_UPLOAD, PROJECT_CREATION_UPLOAD). See the response below." ;;
+                403) echo "::${level}::The API key lacks a permission (403)." ;;
+                404) echo "::${level}::No Dependency-Track API found (404). DTRACK_URL should be the base URL, without /api." ;;
+                *)   echo "::${level}::Dependency-Track returned HTTP $status." ;;
               esac
               echo "Response: $body"
               return 1
@@ -140,6 +143,7 @@ jobs:
           # and VIEW_VULNERABILITY, which the upload itself does not, so a key without them
           # should still produce a green build — the SBOM is already safely ingested.
           report() {
+            local SOFT=1
             call --get "$url/api/v1/project/lookup" \
               -H "X-Api-Key: $key" \
               --data-urlencode "name=$PROJECT_NAME" \
