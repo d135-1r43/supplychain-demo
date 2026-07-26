@@ -206,14 +206,47 @@ Deliberately, so the talk can build it up on stage:
 ## Native builds
 
 ```shell
-./mvnw package -Dnative
-./mvnw package -Dnative -Dquarkus.native.container-build=true   # without a local GraalVM
+./mvnw verify -Dnative                                        # needs a local GraalVM/Mandrel
+./mvnw verify -Dnative -Dquarkus.native.container-build=true  # or build it in a container
 ./target/supplychain-demo-1.0.0-SNAPSHOT-runner
 ```
+
+`-Dnative` activates the `native` profile, which flips `skipITs` to `false` — so the
+`@QuarkusIntegrationTest` suite runs against the actual executable, not against a JAR.
+Expect several minutes.
 
 Native images make a good closing point: the SBOM still describes the Java components that
 went in, even though the artifact you ship is a single binary with no jars left to scan.
 Provenance beats after-the-fact inspection.
+
+## Releasing
+
+Releases are cut with the Maven release plugin and finished by CI:
+
+```shell
+./mvnw release:prepare      # asks for the release and next development version
+```
+
+That sets the version, commits, tags, and pushes. The tag format is configured as
+`v@{project.version}` (so `v1.0.0`, not the plugin's default `supplychain-demo-1.0.0`),
+because `.github/workflows/release.yml` triggers on `v*`.
+
+The tag push starts the **Release** workflow, which builds the native executable on
+GraalVM, runs the integration tests against it, and attaches the binary to a generated
+GitHub release. The per-push **CI build** workflow stays JVM-only so pull requests are not
+held up by several minutes of native compilation; use the Release workflow's
+`workflow_dispatch` trigger to check a native build without tagging.
+
+There is no `distributionManagement`, so `release:perform` is configured to run `verify`
+rather than `deploy` — nothing is published to a Maven repository, and the release artifact
+is the executable attached to the GitHub release.
+
+Two things worth knowing before the first real release:
+
+- the released binary is dynamically linked against the runner's glibc, so it wants a
+  reasonably current Linux; `--static` with musl is the usual answer if that matters
+- once the SBOM steps below are wired up, this workflow is where the release SBOM should be
+  published from, tagged with the release version rather than the branch name
 
 ## References
 

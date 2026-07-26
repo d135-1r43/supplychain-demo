@@ -1,0 +1,64 @@
+## Native build. Runs on the tags produced by `mvn release:prepare` (v1.0.0, v1.1.0, ...)
+## and on demand. Native compilation costs several minutes, which is why it is not part of
+## the per-push CI build.
+
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write # to create the GitHub release and attach the executable to it
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Sets JAVA_HOME to a GraalVM that has native-image, replacing the setup-java step
+      # the CI build uses.
+      - name: Set up GraalVM for JDK 25
+        uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '25'
+          distribution: 'graalvm-community'
+          cache: maven
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # -Dnative activates the native profile, which also flips skipITs to false, so the
+      # @QuarkusIntegrationTest suite runs against the actual executable rather than a JAR.
+      - name: Build native executable and run integration tests
+        run: ./mvnw verify -B -Dnative
+
+      - name: Collect the executable
+        id: binary
+        run: |
+          binary=$(ls target/*-runner)
+          echo "path=$binary" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$binary")-linux-amd64" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.binary.outputs.name }}
+          path: ${{ steps.binary.outputs.path }}
+          if-no-files-found: error
+
+      # Only tags become releases; a manual run just leaves the artifact above.
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp "${{ steps.binary.outputs.path }}" "${{ steps.binary.outputs.name }}"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            "${{ steps.binary.outputs.name }}"

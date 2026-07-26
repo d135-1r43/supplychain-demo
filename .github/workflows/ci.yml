@@ -8,6 +8,10 @@ on:
   pull_request:
     branches: [ main ]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -21,5 +25,7 @@ jobs:
           distribution: temurin
           cache: maven
 
+      # skipITs defaults to true, so the @QuarkusIntegrationTest suite against the packaged
+      # JAR only runs because of the override. Dev Services provides Postgres via Docker.
       - name: Build
-        run: ./mvnw verify -B
+        run: ./mvnw verify -B -DskipITs=false
