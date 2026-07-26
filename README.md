@@ -105,11 +105,12 @@ named after the runnable JAR:
 
 ```shell
 ./mvnw package
-jq '.components | length' target/quarkus-run-cyclonedx.json   # 360
+jq '.components | length' target/quarkus-run-cyclonedx.json
 ```
 
-360 components from the handful of dependencies declared in `pom.xml`. That number is the
-whole argument in one line.
+Several hundred components, from the handful of dependencies declared in `pom.xml`. Run it
+live rather than quoting a number — it drifts with every platform bump, and differs between
+your laptop and the CI runner because the resolved native artifacts are not the same.
 
 Why the extension rather than the more widely known `cyclonedx-maven-plugin`: the plugin
 reports the *Maven dependency tree*, while the Quarkus extension reports the *distribution* —
