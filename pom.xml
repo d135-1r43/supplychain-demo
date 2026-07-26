@@ -65,6 +65,29 @@
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-jdbc-postgresql</artifactId>
         </dependency>
+        <!--
+          ⚠ DELIBERATELY VULNERABLE — DEMO ONLY, DO NOT COPY INTO A REAL PROJECT ⚠
+
+          Nothing in this application imports these. They exist so Dependency-Track has
+          something to report, and are pinned to known-bad versions on purpose:
+
+            log4j-core 2.14.1      CVE-2021-44228 "Log4Shell", CVSS 10.0
+            commons-collections    CVE-2015-6420, unsafe deserialization
+
+          Being unused is itself part of the point: a vulnerable component ships whether or
+          not you call it, and an SBOM finds it either way.
+        -->
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-core</artifactId>
+            <version>2.14.1</version>
+        </dependency>
+        <dependency>
+            <groupId>commons-collections</groupId>
+            <artifactId>commons-collections</artifactId>
+            <version>3.2.1</version>
+        </dependency>
+
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-cyclonedx</artifactId>

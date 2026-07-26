@@ -80,6 +80,11 @@ jobs:
           url=$(printf '%s' "$DTRACK_URL" | tr -d '[:space:]' | sed 's:/*$::')
           key=$(printf '%s' "$DTRACK_API_KEY" | tr -d '[:space:]')
 
+          # Trimming produces a string GitHub's secret masking no longer recognises, so the
+          # hostname could otherwise surface in logs. Re-mask the derived values.
+          echo "::add-mask::$url"
+          echo "::add-mask::$key"
+
           sbom=$(ls target/*-cyclonedx.json)
           echo "Uploading $sbom as $PROJECT_NAME $PROJECT_VERSION"
 
@@ -96,7 +101,7 @@ jobs:
                 # whose team lacks a permission, so the body is the part that matters.
                 401) echo "::error::Dependency-Track returned 401 — either the key is wrong or its team is missing a permission (BOM_UPLOAD, PROJECT_CREATION_UPLOAD). See the response below." ;;
                 403) echo "::error::The API key lacks a permission (403)." ;;
-                404) echo "::error::No Dependency-Track API at $url (404). DTRACK_URL should be the base URL, without /api." ;;
+                404) echo "::error::No Dependency-Track API found (404). DTRACK_URL should be the base URL, without /api." ;;
                 *)   echo "::error::Dependency-Track returned HTTP $status." ;;
               esac
               echo "Response: $body"
@@ -115,17 +120,44 @@ jobs:
 
           # Ingestion is asynchronous. Without waiting, a green build says nothing about
           # whether Dependency-Track actually accepted the document.
+          processed=false
           for _ in $(seq 1 30); do
             call "$url/api/v1/bom/token/$token" -H "X-Api-Key: $key"
             if [ "$(printf '%s' "$body" | jq -r '.processing')" = "false" ]; then
-              echo "Dependency-Track finished processing $PROJECT_NAME $PROJECT_VERSION."
-              exit 0
+              processed=true
+              break
             fi
             sleep 5
           done
 
-          echo "::error::Dependency-Track did not finish processing within 150s."
-          exit 1
+          if [ "$processed" != "true" ]; then
+            echo "::error::Dependency-Track did not finish processing within 150s."
+            exit 1
+          fi
+          echo "Dependency-Track finished processing $PROJECT_NAME $PROJECT_VERSION."
+
+          # Read the findings back, so the build reports what was found instead of merely
+          # reporting that an upload happened. Requires VIEW_PORTFOLIO on the API key.
+          call --get "$url/api/v1/project/lookup" \
+            -H "X-Api-Key: $key" \
+            --data-urlencode "name=$PROJECT_NAME" \
+            --data-urlencode "version=$PROJECT_VERSION"
+          uuid=$(printf '%s' "$body" | jq -r '.uuid')
+
+          call "$url/api/v1/finding/project/$uuid" -H "X-Api-Key: $key"
+          total=$(printf '%s' "$body" | jq 'length')
+          breakdown=$(printf '%s' "$body" | jq -r '
+            if length == 0 then "none"
+            else [.[].vulnerability.severity] | group_by(.)
+                 | map("\(.[0]) \(length)") | join(", ")
+            end')
+
+          echo "::notice::Dependency-Track reports $total findings ($breakdown)"
+          {
+            echo "### Dependency-Track"
+            echo ""
+            echo "\`$PROJECT_NAME\` \`$PROJECT_VERSION\` — **$total findings** ($breakdown)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Pull requests build the image to prove the Dockerfile still works, but stop short of
       # publishing, so the steps below are skipped for them.

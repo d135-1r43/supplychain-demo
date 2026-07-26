@@ -23,17 +23,18 @@ know about it today."
 
 ## Status
 
-The whole pipeline is wired up: the build generates a CycloneDX SBOM, CI publishes it to
-Dependency-Track and pushes a container image to GHCR. What is still missing is anything
-*alarming* to look at — see [What is not wired up yet](#what-is-not-wired-up-yet).
+The whole pipeline is wired up and has something to report: the build generates a CycloneDX
+SBOM, CI publishes it to Dependency-Track and pushes a container image to GHCR, and
+`pom.xml` carries two [deliberately vulnerable dependencies](#the-deliberately-vulnerable-dependencies)
+so the findings page is not empty.
 
 ## Prerequisites
 
 - JDK 25 (the build targets `maven.compiler.release=25`)
 - A container runtime (Docker or Podman) — Quarkus Dev Services starts Postgres for you in
   dev and test mode, so there is no database to install
-- A reachable Dependency-Track instance plus an API key with the `BOM_UPLOAD` permission,
-  for the publishing step
+- A reachable Dependency-Track instance plus an API key whose team has `BOM_UPLOAD`,
+  `PROJECT_CREATION_UPLOAD` and `VIEW_PORTFOLIO`, for the publishing step
 
 ## Running the application
 
@@ -104,10 +105,10 @@ named after the runnable JAR:
 
 ```shell
 ./mvnw package
-jq '.components | length' target/quarkus-run-cyclonedx.json   # 357
+jq '.components | length' target/quarkus-run-cyclonedx.json   # 360
 ```
 
-357 components from the handful of dependencies declared in `pom.xml`. That number is the
+360 components from the handful of dependencies declared in `pom.xml`. That number is the
 whole argument in one line.
 
 Why the extension rather than the more widely known `cyclonedx-maven-plugin`: the plugin
@@ -226,13 +227,32 @@ under *Administration → Access Management → Teams*.
 ./mvnw verify -DskipITs=false   # including the integration tests
 ```
 
+## The deliberately vulnerable dependencies
+
+> ⚠ `pom.xml` pins two known-bad artifacts **on purpose**. This repository is a demo. Do not
+> copy those two `<dependency>` blocks anywhere near a real project.
+
+| Artifact | Vulnerability | |
+| --- | --- | --- |
+| `org.apache.logging.log4j:log4j-core:2.14.1` | CVE-2021-44228 "Log4Shell" | CVSS 10.0 |
+| `commons-collections:commons-collections:3.2.1` | CVE-2015-6420, unsafe deserialization | |
+
+No code in this application imports either of them, which is the point worth making on
+stage: a vulnerable component is part of what you ship whether or not you ever call it, and
+the SBOM lists it either way. "We don't use that class" is not a remediation.
+
+A second detail worth a slide: the Quarkus platform manages `log4j-api` at a current version
+while `log4j-core` sits at the pinned 2.14.1. A split like that — half the library updated,
+half not — is exactly what real dependency trees look like after a few years.
+
+To make the demo boring again, delete both dependencies and the next build reports a clean
+project.
+
 ## What is not wired up yet
 
-- no known-vulnerable dependency is pinned yet, so Dependency-Track has nothing dramatic to
-  report — currently the demo proves the pipeline works, not that it catches anything
 - nothing gates on the findings; the build stays green no matter what Dependency-Track says.
-  Policy violations can fail a build via `GET /api/v1/violation/project/{uuid}` once there is
-  something to violate
+  It reports the count in the job summary, but failing the build on severity or on policy
+  violations (`GET /api/v1/violation/project/{uuid}`) is left as the obvious next step
 
 ## Releasing
 
