@@ -79,30 +79,34 @@ jobs:
             type=raw,value=${{ steps.version.outputs.version }}
             type=raw,value=latest,enable=${{ !startsWith(github.ref, 'refs/tags/v') }}
 
-      - name: Build and push image
+      # On main and tags the image is pushed; on PRs it is loaded into the local Docker
+      # daemon instead, so the SBOM step below can scan it without publishing anything.
+      - name: Build image
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: src/main/docker/Dockerfile.jvm
           push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
       # The Maven SBOM above describes the Java distribution. This one describes the whole
-      # image — UBI 9 base OS packages and the JDK on top of those same jars — scanned from
-      # the exact digest that was just pushed. Skipped on PRs, which build but do not push.
+      # image — UBI 9 base OS packages and the JDK on top of those same jars. On a push it
+      # scans the exact digest just pushed; on a PR it scans the locally loaded image. Either
+      # way the CycloneDX document is attached to the run as a build artifact.
       - name: Generate image SBOM
-        if: github.event_name != 'pull_request'
         uses: anchore/sbom-action@v0
         with:
-          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          image: ${{ github.event_name == 'pull_request' && format('{0}:{1}', env.IMAGE, steps.version.outputs.version) || format('{0}@{1}', env.IMAGE, steps.build.outputs.digest) }}
           format: cyclonedx-json
           output-file: target/image-cyclonedx.json
           artifact-name: image-sbom-${{ steps.version.outputs.version }}.json
 
       # A separate Dependency-Track project so the image and the app SBOM do not overwrite
-      # each other — the whole point is to compare what each one contains.
+      # each other — the whole point is to compare what each one contains. Push only; PRs
+      # build the SBOM but never publish it.
       - name: Publish image SBOM to Dependency-Track
         if: github.event_name != 'pull_request'
         run: |

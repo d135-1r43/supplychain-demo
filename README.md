@@ -317,8 +317,12 @@ That document goes to Dependency-Track as a **separate project**, `supplychain-d
 sharing the same `projectVersion` as the app project for the same build. Two projects, not
 one, because the interesting thing on stage is the comparison: the app SBOM lists a few
 hundred jars, the image SBOM lists those *plus* everything the base layer drags in — which
-is where the OS-level advisories a Maven-only view never sees come from. It is attached to
-every non-PR run as a build artifact too, alongside the app SBOM.
+is where the OS-level advisories a Maven-only view never sees come from.
+
+Pull requests build the image too — loaded into the runner's Docker daemon rather than
+pushed — so the image SBOM is generated and attached as a build artifact on every run,
+alongside the app SBOM. Only the Dependency-Track upload is push-only: a PR shows you the
+image's bill of materials without publishing anything.
 
 | SBOM | Source | Dependency-Track project | Covers |
 | --- | --- | --- | --- |
