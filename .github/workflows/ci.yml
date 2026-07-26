@@ -92,8 +92,10 @@ jobs:
             body=$(printf '%s' "$out" | sed '$d')
             if [ "$status" != "200" ]; then
               case "$status" in
-                401) echo "::error::Dependency-Track rejected the API key (401). Check the key itself." ;;
-                403) echo "::error::The API key lacks a permission (403). BOM_UPLOAD and PROJECT_CREATION_UPLOAD are both required." ;;
+                # Dependency-Track answers 401 both for an unknown key and for a known key
+                # whose team lacks a permission, so the body is the part that matters.
+                401) echo "::error::Dependency-Track returned 401 — either the key is wrong or its team is missing a permission (BOM_UPLOAD, PROJECT_CREATION_UPLOAD). See the response below." ;;
+                403) echo "::error::The API key lacks a permission (403)." ;;
                 404) echo "::error::No Dependency-Track API at $url (404). DTRACK_URL should be the base URL, without /api." ;;
                 *)   echo "::error::Dependency-Track returned HTTP $status." ;;
               esac
