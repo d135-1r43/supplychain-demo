@@ -33,8 +33,9 @@ so the findings page is not empty.
 - JDK 25 (the build targets `maven.compiler.release=25`)
 - A container runtime (Docker or Podman) — Quarkus Dev Services starts Postgres for you in
   dev and test mode, so there is no database to install
-- A reachable Dependency-Track instance plus an API key whose team has `BOM_UPLOAD`,
-  `PROJECT_CREATION_UPLOAD` and `VIEW_PORTFOLIO`, for the publishing step
+- A reachable Dependency-Track instance plus an API key whose team has `BOM_UPLOAD` and
+  `PROJECT_CREATION_UPLOAD` to publish, and `VIEW_PORTFOLIO` + `VIEW_VULNERABILITY` if the
+  build should also report the findings back
 
 ## Running the application
 

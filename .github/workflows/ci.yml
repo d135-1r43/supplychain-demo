@@ -136,28 +136,35 @@ jobs:
           fi
           echo "Dependency-Track finished processing $PROJECT_NAME $PROJECT_VERSION."
 
-          # Read the findings back, so the build reports what was found instead of merely
-          # reporting that an upload happened. Requires VIEW_PORTFOLIO on the API key.
-          call --get "$url/api/v1/project/lookup" \
-            -H "X-Api-Key: $key" \
-            --data-urlencode "name=$PROJECT_NAME" \
-            --data-urlencode "version=$PROJECT_VERSION"
-          uuid=$(printf '%s' "$body" | jq -r '.uuid')
+          # Reading the findings back is reporting, not publishing. It needs VIEW_PORTFOLIO
+          # and VIEW_VULNERABILITY, which the upload itself does not, so a key without them
+          # should still produce a green build — the SBOM is already safely ingested.
+          report() {
+            call --get "$url/api/v1/project/lookup" \
+              -H "X-Api-Key: $key" \
+              --data-urlencode "name=$PROJECT_NAME" \
+              --data-urlencode "version=$PROJECT_VERSION" || return 1
+            uuid=$(printf '%s' "$body" | jq -r '.uuid')
 
-          call "$url/api/v1/finding/project/$uuid" -H "X-Api-Key: $key"
-          total=$(printf '%s' "$body" | jq 'length')
-          breakdown=$(printf '%s' "$body" | jq -r '
-            if length == 0 then "none"
-            else [.[].vulnerability.severity] | group_by(.)
-                 | map("\(.[0]) \(length)") | join(", ")
-            end')
+            call "$url/api/v1/finding/project/$uuid" -H "X-Api-Key: $key" || return 1
+            total=$(printf '%s' "$body" | jq 'length')
+            breakdown=$(printf '%s' "$body" | jq -r '
+              if length == 0 then "none"
+              else [.[].vulnerability.severity] | group_by(.)
+                   | map("\(.[0]) \(length)") | join(", ")
+              end')
 
-          echo "::notice::Dependency-Track reports $total findings ($breakdown)"
-          {
-            echo "### Dependency-Track"
-            echo ""
-            echo "\`$PROJECT_NAME\` \`$PROJECT_VERSION\` — **$total findings** ($breakdown)"
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::Dependency-Track reports $total findings ($breakdown)"
+            {
+              echo "### Dependency-Track"
+              echo ""
+              echo "\`$PROJECT_NAME\` \`$PROJECT_VERSION\` — **$total findings** ($breakdown)"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          if ! report; then
+            echo "::warning::SBOM published, but reading the findings back failed. The API key needs VIEW_PORTFOLIO and VIEW_VULNERABILITY for that."
+          fi
 
       # Pull requests build the image to prove the Dockerfile still works, but stop short of
       # publishing, so the steps below are skipped for them.
