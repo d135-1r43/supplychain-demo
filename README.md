@@ -4,7 +4,8 @@ Demo application for a talk at [JUG München](https://jugm.de/) on software supp
 security in the JVM world.
 
 The app itself is deliberately boring: a small [Quarkus](https://quarkus.io/) REST service
-with a Postgres-backed entity and an LLM client. What matters is its *dependency graph* —
+managing a JUG session schedule — speakers, talks, rooms — on top of Postgres. Nothing about
+the domain matters. What matters is its *dependency graph* —
 the build emits a [CycloneDX](https://cyclonedx.org/) SBOM describing everything that ends
 up in the distribution, and that SBOM is published to
 [Dependency-Track](https://dependencytrack.org/), which continuously correlates it against
@@ -16,13 +17,13 @@ vulnerability sources (OSV, NVD, GitHub Advisories).
 ```
 
 The point of the demo is that nobody audits transitive dependencies by hand. A REST service
-with seven declared dependencies pulls in well over a hundred artifacts, and the interesting
+with a handful of declared dependencies pulls in well over a hundred artifacts, and the interesting
 question is not "what did I write in my `pom.xml`" but "what actually ships, and what do we
 know about it today."
 
 ## Status
 
-The application, the Postgres entity and the CI build are wired up. The CycloneDX and
+The application, its Postgres entities and the CI build are wired up. The CycloneDX and
 Dependency-Track steps described below are the subject of the talk and are added live —
 see [What is not wired up yet](#what-is-not-wired-up-yet).
 
@@ -42,14 +43,31 @@ Dev mode, with live reload and an automatically provisioned Postgres:
 ./mvnw quarkus:dev
 ```
 
-- <http://localhost:8080/hello> — the REST endpoint
-- <http://localhost:8080/q/dev/> — the Dev UI (dev mode only)
 - <http://localhost:8080/q/swagger-ui/> — OpenAPI / Swagger UI
+- <http://localhost:8080/q/dev/> — the Dev UI (dev mode only)
 
-The LangChain4j OpenAI client needs a key before it can talk to anything:
+The database is seeded from `src/main/resources/import.sql` on every start, so there is
+data to look at immediately:
+
+| Method | Path | |
+| --- | --- | --- |
+| `GET` | `/api/talks` | all talks by schedule, `?room=` to filter |
+| `GET` | `/api/talks/{id}` | a single talk |
+| `POST` | `/api/talks` | create; references a speaker by `speakerId` |
+| `PUT` | `/api/talks/{id}` | update |
+| `DELETE` | `/api/talks/{id}` | delete |
+| `GET` | `/api/speakers` | all speakers, `?company=` to filter |
+| `GET` | `/api/speakers/{id}` | a single speaker |
+| `GET` | `/api/speakers/{id}/talks` | that speaker's talks |
+| `POST` | `/api/speakers` | create |
+| `DELETE` | `/api/speakers/{id}` | delete |
 
 ```shell
-export QUARKUS_LANGCHAIN4J_OPENAI_API_KEY=sk-...
+curl -s localhost:8080/api/talks | jq '.[].title'
+curl -s localhost:8080/api/talks -H 'Content-Type: application/json' \
+  -d '{"title":"Reproducible Builds","summary":"Same input, same output.",
+       "durationMinutes":45,"scheduledAt":"2026-11-19T19:00:00",
+       "room":"Hoersaal 1","speakerId":1}'
 ```
 
 Packaging:
@@ -179,8 +197,8 @@ under *Administration → Access Management → Teams*.
 
 Deliberately, so the talk can build it up on stage:
 
-- `quarkus-cyclonedx` is not in `pom.xml`
-- `src/main/resources/application.properties` is empty
+- `quarkus-cyclonedx` is not in `pom.xml`, and `application.properties` has no
+  `quarkus.cyclonedx.*` settings
 - CI builds and tests but does not publish an SBOM
 - no known-vulnerable dependency is pinned yet, so Dependency-Track has nothing dramatic to
   report until one is added

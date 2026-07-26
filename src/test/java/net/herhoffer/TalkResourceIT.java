@@ -3,6 +3,6 @@ package net.herhoffer;
 import io.quarkus.test.junit.QuarkusIntegrationTest;
 
 @QuarkusIntegrationTest
-class GreetingResourceIT extends GreetingResourceTest {
+class TalkResourceIT extends TalkResourceTest {
     // Execute the same tests but in packaged mode.
 }
