@@ -24,7 +24,8 @@ know about it today."
 ## Status
 
 The whole pipeline is wired up and has something to report: the build generates a CycloneDX
-SBOM, CI publishes it to Dependency-Track and pushes a container image to GHCR, and
+SBOM, CI publishes it to Dependency-Track and pushes a container image to GHCR, a
+[second SBOM scans that image](#the-image-sbom) so the base layer is covered too, and
 `pom.xml` carries two [deliberately vulnerable dependencies](#the-deliberately-vulnerable-dependencies)
 so the findings page is not empty.
 
@@ -299,6 +300,30 @@ to exist, so the workflow packages before it builds.
 
 The first push creates the package as **private**. Make it public under the package's
 settings if the audience should be able to pull it.
+
+### The image SBOM
+
+The Maven SBOM describes the *Java distribution* — the jars that ship in
+`target/quarkus-app/`. The image ships more than that: the UBI 9 base OS packages and the
+JDK sit underneath those jars, and none of them appear in the build's CycloneDX document.
+So CI generates a second SBOM, scanning the image itself with
+[Syft](https://github.com/anchore/syft) straight from the digest it just pushed:
+
+```shell
+syft ghcr.io/d135-1r43/supplychain-demo:latest -o cyclonedx-json
+```
+
+That document goes to Dependency-Track as a **separate project**, `supplychain-demo-image`,
+sharing the same `projectVersion` as the app project for the same build. Two projects, not
+one, because the interesting thing on stage is the comparison: the app SBOM lists a few
+hundred jars, the image SBOM lists those *plus* everything the base layer drags in — which
+is where the OS-level advisories a Maven-only view never sees come from. It is attached to
+every non-PR run as a build artifact too, alongside the app SBOM.
+
+| SBOM | Source | Dependency-Track project | Covers |
+| --- | --- | --- | --- |
+| app | `quarkus-cyclonedx`, at build time | `supplychain-demo` | the runtime jars |
+| image | Syft, scanning the pushed image | `supplychain-demo-image` | jars **+** UBI 9 base OS packages + JDK |
 
 ## References
 
