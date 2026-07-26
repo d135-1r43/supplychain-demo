@@ -1,5 +1,5 @@
-## Builds and tests every push and pull request, and publishes a container image to GHCR
-## for anything that lands on main or is tagged by `mvn release:prepare`.
+## Builds and tests every push and pull request. On main and on v* tags it also publishes
+## the SBOM to Dependency-Track and the container image to GHCR.
 
 name: CI build
 
@@ -34,151 +34,33 @@ jobs:
           distribution: temurin
           cache: maven
 
-      # skipITs defaults to true, so the @QuarkusIntegrationTest suite against the packaged
-      # JAR only runs because of the override. Dev Services provides Postgres via Docker.
       - name: Build
         run: ./mvnw verify -B -DskipITs=false
 
-      # On a v* tag this is the version maven-release-plugin set (1.0.0); on main it is the
-      # development version (1.0.1-SNAPSHOT). Everything downstream — the image tag and the
-      # Dependency-Track project version — is derived from this, so they cannot drift apart.
-      - name: Read project coordinates
+      # 1.0.0 on a v* tag, 1.0.1-SNAPSHOT on main. Used for both the Dependency-Track
+      # project version and the image tag, so they always describe the same build.
+      - name: Read project version
         id: version
-        run: |
-          echo "version=$(./mvnw -q -B help:evaluate -Dexpression=project.version -DforceStdout)" >> "$GITHUB_OUTPUT"
-          echo "name=$(./mvnw -q -B help:evaluate -Dexpression=project.artifactId -DforceStdout)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(./mvnw -q -B help:evaluate -Dexpression=project.version -DforceStdout)" >> "$GITHUB_OUTPUT"
 
       - name: Upload SBOM as build artifact
         uses: actions/upload-artifact@v4
         with:
           name: sbom-${{ steps.version.outputs.version }}
           path: target/*-cyclonedx.json
-          if-no-files-found: error
 
-      # The SBOM names its own root component after the runnable JAR ("quarkus-run.jar"), and
-      # the extension has no setting to change that. Dependency-Track would adopt that name
-      # when auto-creating the project, so projectName and projectVersion are passed
-      # explicitly here — they take precedence over the document's own metadata.
+      # projectName is passed explicitly because the SBOM calls itself "quarkus-run.jar" —
+      # without it, autoCreate would name the Dependency-Track project after the JAR.
       - name: Publish SBOM to Dependency-Track
         if: github.event_name != 'pull_request'
-        env:
-          DTRACK_URL: ${{ secrets.DTRACK_URL }}
-          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
-          PROJECT_NAME: ${{ steps.version.outputs.name }}
-          PROJECT_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          set -euo pipefail
+          curl -sSf -X POST "${{ secrets.DTRACK_URL }}/api/v1/bom" \
+            -H "X-Api-Key: ${{ secrets.DTRACK_API_KEY }}" \
+            -F autoCreate=true \
+            -F projectName=supplychain-demo \
+            -F projectVersion=${{ steps.version.outputs.version }} \
+            -F bom=@$(ls target/*-cyclonedx.json)
 
-          if [ -z "${DTRACK_URL:-}" ] || [ -z "${DTRACK_API_KEY:-}" ]; then
-            echo "::warning::DTRACK_URL / DTRACK_API_KEY are not configured — skipping SBOM upload."
-            exit 0
-          fi
-
-          # Secrets set from a file or a here-string keep their trailing newline, which ends up
-          # inside the header and reads as a bad key. Strip whitespace and any trailing slash
-          # rather than debugging a 401 that is really a stray \n.
-          url=$(printf '%s' "$DTRACK_URL" | tr -d '[:space:]' | sed 's:/*$::')
-          key=$(printf '%s' "$DTRACK_API_KEY" | tr -d '[:space:]')
-
-          # Trimming produces a string GitHub's secret masking no longer recognises, so the
-          # hostname could otherwise surface in logs. Re-mask the derived values.
-          echo "::add-mask::$url"
-          echo "::add-mask::$key"
-
-          sbom=$(ls target/*-cyclonedx.json)
-          echo "Uploading $sbom as $PROJECT_NAME $PROJECT_VERSION"
-
-          # Splits the status code off the body so a failure can say what actually happened
-          # instead of failing later on unparseable JSON.
-          # SOFT=1 downgrades the annotation to a warning, for calls whose failure the caller
-          # intends to recover from — an error annotation on a green run is just confusing.
-          call() {
-            local out status level=error target=
-            [ -n "${SOFT:-}" ] && level=warning
-            for a in "$@"; do case "$a" in http*) target=$a ;; esac; done
-            out=$(curl -sS -w '\n%{http_code}' "$@")
-            status=$(printf '%s' "$out" | tail -n1)
-            body=$(printf '%s' "$out" | sed '$d')
-            if [ "$status" != "200" ]; then
-              echo "Request: ${target#"$url"} -> HTTP $status"
-              case "$status" in
-                # Dependency-Track answers 401 both for an unknown key and for a known key
-                # whose team lacks a permission, so the body is the part that matters.
-                401) echo "::${level}::Dependency-Track returned 401 — either the key is wrong or its team is missing a permission (BOM_UPLOAD, PROJECT_CREATION_UPLOAD). See the response below." ;;
-                403) echo "::${level}::The API key lacks a permission (403)." ;;
-                404) echo "::${level}::No Dependency-Track API found (404). DTRACK_URL should be the base URL, without /api." ;;
-                *)   echo "::${level}::Dependency-Track returned HTTP $status." ;;
-              esac
-              echo "Response: $body"
-              return 1
-            fi
-          }
-
-          # autoCreate lets the first upload of a new version create the project.
-          call -X POST "$url/api/v1/bom" \
-            -H "X-Api-Key: $key" \
-            -F "autoCreate=true" \
-            -F "projectName=$PROJECT_NAME" \
-            -F "projectVersion=$PROJECT_VERSION" \
-            -F "bom=@$sbom"
-          token=$(printf '%s' "$body" | jq -r '.token')
-
-          # Ingestion is asynchronous. Without waiting, a green build says nothing about
-          # whether Dependency-Track actually accepted the document.
-          processed=false
-          for _ in $(seq 1 30); do
-            call "$url/api/v1/bom/token/$token" -H "X-Api-Key: $key"
-            if [ "$(printf '%s' "$body" | jq -r '.processing')" = "false" ]; then
-              processed=true
-              break
-            fi
-            sleep 5
-          done
-
-          if [ "$processed" != "true" ]; then
-            echo "::error::Dependency-Track did not finish processing within 150s."
-            exit 1
-          fi
-          echo "Dependency-Track finished processing $PROJECT_NAME $PROJECT_VERSION."
-
-          # Reading the findings back is reporting, not publishing. It needs VIEW_PORTFOLIO
-          # and VIEW_VULNERABILITY, which the upload itself does not, so a key without them
-          # should still produce a green build — the SBOM is already safely ingested.
-          report() {
-            local SOFT=1
-            call --get "$url/api/v1/project/lookup" \
-              -H "X-Api-Key: $key" \
-              --data-urlencode "name=$PROJECT_NAME" \
-              --data-urlencode "version=$PROJECT_VERSION" || return 1
-            uuid=$(printf '%s' "$body" | jq -r '.uuid')
-
-            call "$url/api/v1/finding/project/$uuid" -H "X-Api-Key: $key" || return 1
-            total=$(printf '%s' "$body" | jq 'length')
-            breakdown=$(printf '%s' "$body" | jq -r '
-              if length == 0 then "none"
-              else [.[].vulnerability.severity] | group_by(.)
-                   | map("\(.[0]) \(length)") | join(", ")
-              end')
-
-            echo "::notice::Dependency-Track reports $total findings ($breakdown)"
-            {
-              echo "### Dependency-Track"
-              echo ""
-              echo "\`$PROJECT_NAME\` \`$PROJECT_VERSION\` — **$total findings** ($breakdown)"
-            } >> "$GITHUB_STEP_SUMMARY"
-          }
-
-          if ! report; then
-            echo "::warning::SBOM published, but reading the findings back failed. The API key needs VIEW_PORTFOLIO and VIEW_VULNERABILITY for that."
-            # Report what the key actually carries. A permission added to the wrong team looks
-            # identical to one that was never added at all.
-            if SOFT=1 call "$url/api/v1/team/self" -H "X-Api-Key: $key"; then
-              printf '%s' "$body" | jq -r '"Key belongs to team: \(.name)\nIts permissions: \([.permissions[].name] | join(", "))"'
-            fi
-          fi
-
-      # Pull requests build the image to prove the Dockerfile still works, but stop short of
-      # publishing, so the steps below are skipped for them.
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
@@ -187,10 +69,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # `latest` deliberately tracks the snapshot from main rather than the newest release:
-      # pulling it should give you what the demo currently looks like. Releases are only
-      # reachable under their exact version.
-      - name: Compute image tags and labels
+      # `latest` tracks the snapshot from main, not the newest release.
+      - name: Compute image tags
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -198,9 +78,6 @@ jobs:
           tags: |
             type=raw,value=${{ steps.version.outputs.version }}
             type=raw,value=latest,enable=${{ !startsWith(github.ref, 'refs/tags/v') }}
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
 
       - name: Build and push image
         uses: docker/build-push-action@v6
@@ -210,5 +87,3 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

@@ -34,8 +34,7 @@ so the findings page is not empty.
 - A container runtime (Docker or Podman) — Quarkus Dev Services starts Postgres for you in
   dev and test mode, so there is no database to install
 - A reachable Dependency-Track instance plus an API key whose team has `BOM_UPLOAD` and
-  `PROJECT_CREATION_UPLOAD` to publish, and `VIEW_PORTFOLIO` + `VIEW_VULNERABILITY` if the
-  build should also report the findings back
+  `PROJECT_CREATION_UPLOAD`, for the publishing step
 
 ## Running the application
 
@@ -196,13 +195,12 @@ it is a subscription to bad news about code you already shipped.
 repository secrets:
 
 ```shell
-gh secret set DTRACK_URL      # https://dependency-track.example — no trailing slash
-gh secret set DTRACK_API_KEY  # a key from a team with BOM_UPLOAD and PROJECT_CREATION_UPLOAD
+gh secret set DTRACK_URL --body "https://dependency-track.example"   # no trailing slash
+gh secret set DTRACK_API_KEY                                        # prompts, keeps it off the shell history
 ```
 
-If either is unset the step logs a warning and skips, so forks and clones still build. The
-SBOM is also attached to every run as a build artifact, so it can be downloaded and shown
-even without a reachable Dependency-Track.
+The SBOM is also attached to every run as a build artifact, so it can be downloaded and
+shown even without a reachable Dependency-Track.
 
 The instance has to be reachable from the GitHub runner. A Dependency-Track running on your
 laptop is not — for that, upload from the workstation with the `curl` above.
@@ -251,9 +249,10 @@ project.
 
 ## What is not wired up yet
 
-- nothing gates on the findings; the build stays green no matter what Dependency-Track says.
-  It reports the count in the job summary, but failing the build on severity or on policy
-  violations (`GET /api/v1/violation/project/{uuid}`) is left as the obvious next step
+- nothing gates on the findings; CI uploads the SBOM and moves on, so the build stays green
+  no matter what Dependency-Track says. Reading the findings back and failing on severity or
+  on policy violations is the obvious next step, and deliberately left out of the proof of
+  concept
 
 ## Releasing
 
