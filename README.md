@@ -1,82 +1,205 @@
 # supplychain-demo
 
-This project uses Quarkus, the Supersonic Subatomic Java Framework.
+Demo application for a talk at [JUG München](https://jugm.de/) on software supply chain
+security in the JVM world.
 
-If you want to learn more about Quarkus, please visit its website: <https://quarkus.io/>.
+The app itself is deliberately boring: a small [Quarkus](https://quarkus.io/) REST service
+with a Postgres-backed entity and an LLM client. What matters is its *dependency graph* —
+the build emits a [CycloneDX](https://cyclonedx.org/) SBOM describing everything that ends
+up in the distribution, and that SBOM is published to
+[Dependency-Track](https://dependencytrack.org/), which continuously correlates it against
+vulnerability sources (OSV, NVD, GitHub Advisories).
 
-## Running the application in dev mode
+```
+./mvnw package  ──►  target/*-cyclonedx.json  ──►  Dependency-Track  ──►  findings / policy violations
+     (Quarkus)          (CycloneDX SBOM)            (POST /api/v1/bom)
+```
 
-You can run your application in dev mode that enables live coding using:
+The point of the demo is that nobody audits transitive dependencies by hand. A REST service
+with seven declared dependencies pulls in well over a hundred artifacts, and the interesting
+question is not "what did I write in my `pom.xml`" but "what actually ships, and what do we
+know about it today."
 
-```shell script
+## Status
+
+The application, the Postgres entity and the CI build are wired up. The CycloneDX and
+Dependency-Track steps described below are the subject of the talk and are added live —
+see [What is not wired up yet](#what-is-not-wired-up-yet).
+
+## Prerequisites
+
+- JDK 25 (the build targets `maven.compiler.release=25`)
+- A container runtime (Docker or Podman) — Quarkus Dev Services starts Postgres for you in
+  dev and test mode, so there is no database to install
+- A reachable Dependency-Track instance plus an API key with the `BOM_UPLOAD` permission,
+  for the publishing step
+
+## Running the application
+
+Dev mode, with live reload and an automatically provisioned Postgres:
+
+```shell
 ./mvnw quarkus:dev
 ```
 
-> **_NOTE:_**  Quarkus now ships with a Dev UI, which is available in dev mode only at <http://localhost:8080/q/dev/>.
+- <http://localhost:8080/hello> — the REST endpoint
+- <http://localhost:8080/q/dev/> — the Dev UI (dev mode only)
+- <http://localhost:8080/q/swagger-ui/> — OpenAPI / Swagger UI
 
-## Packaging and running the application
+The LangChain4j OpenAI client needs a key before it can talk to anything:
 
-The application can be packaged using:
+```shell
+export QUARKUS_LANGCHAIN4J_OPENAI_API_KEY=sk-...
+```
 
-```shell script
+Packaging:
+
+```shell
 ./mvnw package
+java -jar target/quarkus-app/quarkus-run.jar
 ```
 
-It produces the `quarkus-run.jar` file in the `target/quarkus-app/` directory.
-Be aware that it’s not an _über-jar_ as the dependencies are copied into the `target/quarkus-app/lib/` directory.
+Note this is not an über-jar — dependencies are copied into `target/quarkus-app/lib/`. Which
+is convenient for this demo, because you can look at exactly what shipped.
 
-The application is now runnable using `java -jar target/quarkus-app/quarkus-run.jar`.
+## Generating the SBOM
 
-If you want to build an _über-jar_, execute the following command:
+SBOM generation is a Quarkus extension, not a separate plugin invocation. Add it as a
+dependency:
 
-```shell script
-./mvnw package -Dquarkus.package.jar.type=uber-jar
+```xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-cyclonedx</artifactId>
+</dependency>
 ```
 
-The application, packaged as an _über-jar_, is now runnable using `java -jar target/*-runner.jar`.
+and configure it in `src/main/resources/application.properties`:
 
-## Creating a native executable
+```properties
+quarkus.cyclonedx.format=json
+quarkus.cyclonedx.pretty-print=true
+```
 
-You can create a native executable using:
+Every `./mvnw package` now writes a CycloneDX document into the build output directory,
+named after the executable with a `-cyclonedx.<format>` suffix:
 
-```shell script
+```shell
+./mvnw package
+ls target/*-cyclonedx.json
+```
+
+Why the extension rather than the more widely known `cyclonedx-maven-plugin`: the plugin
+reports the *Maven dependency tree*, while the Quarkus extension reports the *distribution* —
+what the augmentation step actually assembled, after Quarkus has dropped build-time-only
+artifacts and resolved the runtime classpath. Those two lists are not the same, and the
+difference is worth a slide.
+
+Useful variations:
+
+| Property | Effect |
+| --- | --- |
+| `quarkus.cyclonedx.format=all` | Emit both JSON and XML |
+| `quarkus.cyclonedx.libraries-only=true` | Only library components, no application metadata |
+| `quarkus.cyclonedx.schema-version` | Pin the CycloneDX schema version |
+| `quarkus.cyclonedx.include-license-text=true` | Embed full license texts |
+| `quarkus.cyclonedx.embedded.enabled=true` | Ship the SBOM inside the app as a classpath resource |
+| `quarkus.cyclonedx.endpoint.enabled=true` | Serve the embedded SBOM over HTTP |
+
+The last two are the fun ones: the application can carry and expose its own bill of
+materials at runtime, so an auditor can ask a *running* instance what it is made of instead
+of trusting a build artifact from months ago.
+
+## Publishing to Dependency-Track
+
+Dependency-Track accepts a BOM on `POST /api/v1/bom` as a multipart upload. With
+`autoCreate=true` it creates the project on first upload, so there is no manual setup:
+
+```shell
+export DTRACK_URL=https://dependency-track.example
+export DTRACK_API_KEY=...
+
+curl -sS -X POST "$DTRACK_URL/api/v1/bom" \
+  -H "X-Api-Key: $DTRACK_API_KEY" \
+  -F "autoCreate=true" \
+  -F "projectName=supplychain-demo" \
+  -F "projectVersion=1.0.0-SNAPSHOT" \
+  -F "bom=@$(ls target/*-cyclonedx.json)"
+```
+
+The response contains a token you can poll on `GET /api/v1/bom/token/{token}` to find out
+when Dependency-Track has finished processing — worth doing in CI before you gate a build on
+the findings.
+
+Once ingested, Dependency-Track keeps re-evaluating the SBOM as new advisories land. That is
+the actual argument of the talk: an SBOM is not a build artifact you produce once and file
+away, it is a subscription to bad news about code you already shipped.
+
+### In CI
+
+`.github/workflows/ci.yml` currently only builds and tests. The publishing step slots in
+after the build:
+
+```yaml
+      - name: Publish SBOM to Dependency-Track
+        run: |
+          curl -sS -X POST "${{ secrets.DTRACK_URL }}/api/v1/bom" \
+            -H "X-Api-Key: ${{ secrets.DTRACK_API_KEY }}" \
+            -F "autoCreate=true" \
+            -F "projectName=supplychain-demo" \
+            -F "projectVersion=${{ github.ref_name }}" \
+            -F "bom=@$(ls target/*-cyclonedx.json)"
+```
+
+Use one `projectVersion` per release, not per commit, unless you enjoy scrolling through
+several thousand projects in the Dependency-Track UI.
+
+## Running Dependency-Track locally
+
+For the demo, the bundled distribution is enough:
+
+```shell
+curl -sSL -o docker-compose.yml https://dependencytrack.org/docker-compose.yml
+docker compose up -d
+```
+
+The UI comes up on <http://localhost:8080> — which collides with Quarkus, so either remap it
+or run the app elsewhere with `-Dquarkus.http.port=8081`. Default credentials are
+`admin` / `admin`; you are asked to change the password on first login. Create the API key
+under *Administration → Access Management → Teams*.
+
+## Testing
+
+```shell
+./mvnw test                     # Dev Services provides Postgres
+./mvnw verify -DskipITs=false   # including the integration tests
+```
+
+## What is not wired up yet
+
+Deliberately, so the talk can build it up on stage:
+
+- `quarkus-cyclonedx` is not in `pom.xml`
+- `src/main/resources/application.properties` is empty
+- CI builds and tests but does not publish an SBOM
+- no known-vulnerable dependency is pinned yet, so Dependency-Track has nothing dramatic to
+  report until one is added
+
+## Native builds
+
+```shell
 ./mvnw package -Dnative
+./mvnw package -Dnative -Dquarkus.native.container-build=true   # without a local GraalVM
+./target/supplychain-demo-1.0.0-SNAPSHOT-runner
 ```
 
-Or, if you don't have GraalVM installed, you can run the native executable build in a container using:
+Native images make a good closing point: the SBOM still describes the Java components that
+went in, even though the artifact you ship is a single binary with no jars left to scan.
+Provenance beats after-the-fact inspection.
 
-```shell script
-./mvnw package -Dnative -Dquarkus.native.container-build=true
-```
+## References
 
-You can then execute your native executable with: `./target/supplychain-demo-1.0.0-SNAPSHOT-runner`
-
-If you want to learn more about building native executables, please consult <https://quarkus.io/guides/maven-tooling>.
-
-## Related Guides
-
-- REST ([guide](https://quarkus.io/guides/rest)): Build RESTful web services and APIs using Jakarta REST (formerly JAX-RS)
-- SmallRye OpenAPI ([guide](https://quarkus.io/guides/openapi-swaggerui)): Generate OpenAPI schemas and serve Swagger UI for REST API documentation
-- REST Jackson ([guide](https://quarkus.io/guides/rest#json-serialisation)): Jackson serialization support for Quarkus REST. This extension is not compatible with the quarkus-resteasy extension, or any of the extensions that depend on it
-- REST JAXB ([guide](https://quarkus.io/guides/resteasy-reactive#xml-serialisation)): JAXB serialization support for Quarkus REST. This extension is not compatible with the quarkus-resteasy extension, or any of the extensions that depend on it.
-- Quarkus Data Hibernate ([guide](https://quarkus.io/guides/quarkus-data-hibernate)): Experimental: Simplify your persistence code for Hibernate ORM and Hibernate Reactive and Jakarta Data
-- JDBC Driver - PostgreSQL ([guide](https://quarkus.io/guides/datasource)): Connect to the PostgreSQL database via JDBC
-- LangChain4j OpenAI ([guide](https://docs.quarkiverse.io/quarkus-langchain4j/dev/index.html)): Provides the basic integration with LangChain4j
-
-## Provided Code
-
-### Hibernate ORM
-
-Create your first JPA entity
-
-[Related guide section...](https://quarkus.io/guides/hibernate-orm)
-
-[Related Quarkus Data Hibernate section...](https://quarkus.io/guides/quarkus-data-hibernate)
-
-
-
-### REST
-
-Easily start your REST Web Services
-
-[Related guide section...](https://quarkus.io/guides/getting-started-reactive#reactive-jax-rs-resources)
+- [Quarkus CycloneDX guide](https://quarkus.io/guides/cyclonedx)
+- [CycloneDX specification](https://cyclonedx.org/specification/overview/)
+- [Dependency-Track REST API](https://docs.dependencytrack.org/integrations/rest-api/)
+- [JUG München](https://jugm.de/)
