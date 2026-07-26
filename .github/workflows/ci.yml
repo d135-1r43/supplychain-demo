@@ -40,10 +40,62 @@ jobs:
         run: ./mvnw verify -B -DskipITs=false
 
       # On a v* tag this is the version maven-release-plugin set (1.0.0); on main it is the
-      # development version (1.0.1-SNAPSHOT). Either way the image tag matches the artifact.
-      - name: Read project version
+      # development version (1.0.1-SNAPSHOT). Everything downstream — the image tag and the
+      # Dependency-Track project version — is derived from this, so they cannot drift apart.
+      - name: Read project coordinates
         id: version
-        run: echo "version=$(./mvnw -q -B help:evaluate -Dexpression=project.version -DforceStdout)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "version=$(./mvnw -q -B help:evaluate -Dexpression=project.version -DforceStdout)" >> "$GITHUB_OUTPUT"
+          echo "name=$(./mvnw -q -B help:evaluate -Dexpression=project.artifactId -DforceStdout)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload SBOM as build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ steps.version.outputs.version }}
+          path: target/*-cyclonedx.json
+          if-no-files-found: error
+
+      # The SBOM names its own root component after the runnable JAR ("quarkus-run.jar"), and
+      # the extension has no setting to change that. Dependency-Track would adopt that name
+      # when auto-creating the project, so projectName and projectVersion are passed
+      # explicitly here — they take precedence over the document's own metadata.
+      - name: Publish SBOM to Dependency-Track
+        if: github.event_name != 'pull_request'
+        env:
+          DTRACK_URL: ${{ secrets.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PROJECT_NAME: ${{ steps.version.outputs.name }}
+          PROJECT_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DTRACK_URL:-}" ] || [ -z "${DTRACK_API_KEY:-}" ]; then
+            echo "::warning::DTRACK_URL / DTRACK_API_KEY are not configured — skipping SBOM upload."
+            exit 0
+          fi
+
+          sbom=$(ls target/*-cyclonedx.json)
+          echo "Uploading $sbom as $PROJECT_NAME $PROJECT_VERSION"
+
+          # autoCreate lets the first upload of a new version create the project.
+          token=$(curl -sS --fail-with-body -X POST "$DTRACK_URL/api/v1/bom" \
+            -H "X-Api-Key: $DTRACK_API_KEY" \
+            -F "autoCreate=true" \
+            -F "projectName=$PROJECT_NAME" \
+            -F "projectVersion=$PROJECT_VERSION" \
+            -F "bom=@$sbom" | jq -r '.token')
+
+          # Ingestion is asynchronous. Without waiting, a green build says nothing about
+          # whether Dependency-Track actually accepted the document.
+          for _ in $(seq 1 30); do
+            processing=$(curl -sS --fail-with-body "$DTRACK_URL/api/v1/bom/token/$token" \
+              -H "X-Api-Key: $DTRACK_API_KEY" | jq -r '.processing')
+            [ "$processing" = "false" ] && echo "Dependency-Track finished processing." && exit 0
+            sleep 5
+          done
+
+          echo "::error::Dependency-Track did not finish processing within 150s."
+          exit 1
 
       # Pull requests build the image to prove the Dockerfile still works, but stop short of
       # publishing, so the steps below are skipped for them.

@@ -23,9 +23,9 @@ know about it today."
 
 ## Status
 
-The application, its Postgres entities and the CI build are wired up. The CycloneDX and
-Dependency-Track steps described below are the subject of the talk and are added live —
-see [What is not wired up yet](#what-is-not-wired-up-yet).
+The whole pipeline is wired up: the build generates a CycloneDX SBOM, CI publishes it to
+Dependency-Track and pushes a container image to GHCR. What is still missing is anything
+*alarming* to look at — see [What is not wired up yet](#what-is-not-wired-up-yet).
 
 ## Prerequisites
 
@@ -82,8 +82,8 @@ is convenient for this demo, because you can look at exactly what shipped.
 
 ## Generating the SBOM
 
-SBOM generation is a Quarkus extension, not a separate plugin invocation. Add it as a
-dependency:
+SBOM generation is a Quarkus extension, not a separate plugin invocation. It is wired up in
+`pom.xml`:
 
 ```xml
 <dependency>
@@ -92,20 +92,23 @@ dependency:
 </dependency>
 ```
 
-and configure it in `src/main/resources/application.properties`:
+and configured in `src/main/resources/application.properties`:
 
 ```properties
 quarkus.cyclonedx.format=json
 quarkus.cyclonedx.pretty-print=true
 ```
 
-Every `./mvnw package` now writes a CycloneDX document into the build output directory,
-named after the executable with a `-cyclonedx.<format>` suffix:
+Every `./mvnw package` writes a CycloneDX 1.6 document into the build output directory,
+named after the runnable JAR:
 
 ```shell
 ./mvnw package
-ls target/*-cyclonedx.json
+jq '.components | length' target/quarkus-run-cyclonedx.json   # 357
 ```
+
+357 components from the handful of dependencies declared in `pom.xml`. That number is the
+whole argument in one line.
 
 Why the extension rather than the more widely known `cyclonedx-maven-plugin`: the plugin
 reports the *Maven dependency tree*, while the Quarkus extension reports the *distribution* —
@@ -113,64 +116,94 @@ what the augmentation step actually assembled, after Quarkus has dropped build-t
 artifacts and resolved the runtime classpath. Those two lists are not the same, and the
 difference is worth a slide.
 
-Useful variations:
+The complete set of settings the extension offers in Quarkus 3.37 — there are only nine:
 
-| Property | Effect |
-| --- | --- |
-| `quarkus.cyclonedx.format=all` | Emit both JSON and XML |
-| `quarkus.cyclonedx.libraries-only=true` | Only library components, no application metadata |
-| `quarkus.cyclonedx.schema-version` | Pin the CycloneDX schema version |
-| `quarkus.cyclonedx.include-license-text=true` | Embed full license texts |
-| `quarkus.cyclonedx.embedded.enabled=true` | Ship the SBOM inside the app as a classpath resource |
-| `quarkus.cyclonedx.endpoint.enabled=true` | Serve the embedded SBOM over HTTP |
+| Property | Default | Effect |
+| --- | --- | --- |
+| `quarkus.cyclonedx.enabled` | `true` | Generate the SBOM at all |
+| `quarkus.cyclonedx.format` | `json` | `json`, `xml` or both |
+| `quarkus.cyclonedx.schema-version` | latest | Pin the CycloneDX schema version |
+| `quarkus.cyclonedx.pretty-print` | `false` | Readable output |
+| `quarkus.cyclonedx.include-license-text` | `false` | Embed full license texts |
+| `quarkus.cyclonedx.embedded.enabled` | `false` | Ship the SBOM inside the app |
+| `quarkus.cyclonedx.embedded.resource-name` | `META-INF/sbom/dependency.cdx.json` | Where it lands on the classpath |
+| `quarkus.cyclonedx.embedded.compress` | `true` | Compress the embedded copy |
 
-The last two are the fun ones: the application can carry and expose its own bill of
-materials at runtime, so an auditor can ask a *running* instance what it is made of instead
-of trusting a build artifact from months ago.
+`embedded.enabled` is the interesting one: the application carries its own bill of materials
+as a classpath resource, so an auditor can ask a *running* instance what it is made of
+instead of trusting a build artifact from months ago.
+
+Note what is **not** on that list: there is no setting for the name the SBOM gives itself.
+See below.
 
 ## Publishing to Dependency-Track
 
-Dependency-Track accepts a BOM on `POST /api/v1/bom` as a multipart upload. With
-`autoCreate=true` it creates the project on first upload, so there is no manual setup:
+### Getting the name and version right
+
+The SBOM names its own root component after the runnable JAR, not after the project:
+
+```json
+"metadata": { "component": { "name": "quarkus-run.jar", "version": "1.0.1-SNAPSHOT" } }
+```
+
+The version is right, the name is not, and the extension has no setting to change it. Left
+alone, `autoCreate=true` would happily create a Dependency-Track project called
+*quarkus-run.jar*. So the upload passes `projectName` and `projectVersion` explicitly — form
+fields take precedence over the document's own metadata:
+
+| Trigger | `projectVersion` in Dependency-Track |
+| --- | --- |
+| push to `main` | `1.0.1-SNAPSHOT` — overwritten on every build |
+| tag `v1.0.0` | `1.0.0` — frozen, one project version per release |
+| pull request | not uploaded |
+
+Both come from `./mvnw help:evaluate`, the same values that tag the container image, so the
+image and the Dependency-Track project version always describe the same build. One
+`projectVersion` per release, not per commit — otherwise you will be scrolling through
+several thousand project versions in the UI.
+
+### Uploading
+
+Dependency-Track accepts a BOM on `POST /api/v1/bom` as a multipart upload:
 
 ```shell
 export DTRACK_URL=https://dependency-track.example
 export DTRACK_API_KEY=...
 
-curl -sS -X POST "$DTRACK_URL/api/v1/bom" \
+curl -sS --fail-with-body -X POST "$DTRACK_URL/api/v1/bom" \
   -H "X-Api-Key: $DTRACK_API_KEY" \
   -F "autoCreate=true" \
   -F "projectName=supplychain-demo" \
-  -F "projectVersion=1.0.0-SNAPSHOT" \
+  -F "projectVersion=$(./mvnw -q help:evaluate -Dexpression=project.version -DforceStdout)" \
   -F "bom=@$(ls target/*-cyclonedx.json)"
 ```
 
-The response contains a token you can poll on `GET /api/v1/bom/token/{token}` to find out
-when Dependency-Track has finished processing — worth doing in CI before you gate a build on
-the findings.
+The response contains a token. Ingestion is asynchronous, so a `200` only means the document
+was accepted for processing, not that it was processed — poll
+`GET /api/v1/bom/token/{token}` until `processing` is `false` before believing anything. The
+CI step does exactly this; without it a green build says nothing about whether
+Dependency-Track actually took the SBOM.
 
-Once ingested, Dependency-Track keeps re-evaluating the SBOM as new advisories land. That is
-the actual argument of the talk: an SBOM is not a build artifact you produce once and file
-away, it is a subscription to bad news about code you already shipped.
+Once ingested, Dependency-Track keeps re-evaluating it as new advisories land. That is the
+actual argument of the talk: an SBOM is not a build artifact you produce once and file away,
+it is a subscription to bad news about code you already shipped.
 
 ### In CI
 
-`.github/workflows/ci.yml` currently only builds and tests. The publishing step slots in
-after the build:
+`.github/workflows/ci.yml` uploads on every push to `main` and every `v*` tag. It needs two
+repository secrets:
 
-```yaml
-      - name: Publish SBOM to Dependency-Track
-        run: |
-          curl -sS -X POST "${{ secrets.DTRACK_URL }}/api/v1/bom" \
-            -H "X-Api-Key: ${{ secrets.DTRACK_API_KEY }}" \
-            -F "autoCreate=true" \
-            -F "projectName=supplychain-demo" \
-            -F "projectVersion=${{ github.ref_name }}" \
-            -F "bom=@$(ls target/*-cyclonedx.json)"
+```shell
+gh secret set DTRACK_URL      # https://dependency-track.example — no trailing slash
+gh secret set DTRACK_API_KEY  # a key from a team with BOM_UPLOAD and PROJECT_CREATION_UPLOAD
 ```
 
-Use one `projectVersion` per release, not per commit, unless you enjoy scrolling through
-several thousand projects in the Dependency-Track UI.
+If either is unset the step logs a warning and skips, so forks and clones still build. The
+SBOM is also attached to every run as a build artifact, so it can be downloaded and shown
+even without a reachable Dependency-Track.
+
+The instance has to be reachable from the GitHub runner. A Dependency-Track running on your
+laptop is not — for that, upload from the workstation with the `curl` above.
 
 ## Running Dependency-Track locally
 
@@ -195,13 +228,11 @@ under *Administration → Access Management → Teams*.
 
 ## What is not wired up yet
 
-Deliberately, so the talk can build it up on stage:
-
-- `quarkus-cyclonedx` is not in `pom.xml`, and `application.properties` has no
-  `quarkus.cyclonedx.*` settings
-- CI builds and tests but does not publish an SBOM
 - no known-vulnerable dependency is pinned yet, so Dependency-Track has nothing dramatic to
-  report until one is added
+  report — currently the demo proves the pipeline works, not that it catches anything
+- nothing gates on the findings; the build stays green no matter what Dependency-Track says.
+  Policy violations can fail a build via `GET /api/v1/violation/project/{uuid}` once there is
+  something to violate
 
 ## Releasing
 
