@@ -93,12 +93,14 @@ jobs:
           # SOFT=1 downgrades the annotation to a warning, for calls whose failure the caller
           # intends to recover from — an error annotation on a green run is just confusing.
           call() {
-            local out status level=error
+            local out status level=error target=
             [ -n "${SOFT:-}" ] && level=warning
+            for a in "$@"; do case "$a" in http*) target=$a ;; esac; done
             out=$(curl -sS -w '\n%{http_code}' "$@")
             status=$(printf '%s' "$out" | tail -n1)
             body=$(printf '%s' "$out" | sed '$d')
             if [ "$status" != "200" ]; then
+              echo "Request: ${target#"$url"} -> HTTP $status"
               case "$status" in
                 # Dependency-Track answers 401 both for an unknown key and for a known key
                 # whose team lacks a permission, so the body is the part that matters.
