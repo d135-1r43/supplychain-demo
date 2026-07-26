@@ -1,0 +1,28 @@
+# Keeps the three moving parts of this repo current: the Maven dependency tree, the base
+# images in the Dockerfiles, and the actions pinned in the CI workflow.
+
+version: 2
+updates:
+  # pom.xml at the repo root.
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    # These two are pinned known-vulnerable ON PURPOSE — they are the whole demo. Let
+    # Dependabot bump everything else, but never these, or the findings page goes empty.
+    ignore:
+      - dependency-name: "org.apache.logging.log4j:log4j-core"
+      - dependency-name: "commons-collections:commons-collections"
+
+  # All four Dockerfiles live here; Dependabot scans every one for base-image updates.
+  - package-ecosystem: docker
+    directory: /src/main/docker
+    schedule:
+      interval: weekly
+
+  # The pinned actions in .github/workflows (this is what silences the Node 20 warnings).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
